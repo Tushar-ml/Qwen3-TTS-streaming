@@ -686,12 +686,12 @@ class Qwen3TTSModel:
     @torch.inference_mode()
     def stream_generate_voice_clone(
         self,
-        text: str,
-        language: str = None,
+        text: Union[str, List[str]],
+        language: Union[str, List[str]] = None,
         ref_audio: Optional[AudioLike] = None,
         ref_text: Optional[str] = None,
         x_vector_only_mode: bool = False,
-        voice_clone_prompt: Optional[Union[Dict[str, Any], VoiceClonePromptItem]] = None,
+        voice_clone_prompt: Optional[Union[Dict[str, Any], VoiceClonePromptItem, List[VoiceClonePromptItem]]] = None,
         non_streaming_mode: bool = False,
         # Streaming control
         emit_every_frames: int = 8,
@@ -705,19 +705,20 @@ class Qwen3TTSModel:
         first_chunk_decode_window: int = 48,
         first_chunk_frames: int = 48,  # Switch to stable after this many frames
         **kwargs,
-    ) -> Generator[Tuple[np.ndarray, int], None, None]:
+    ) -> Generator[Tuple[List[np.ndarray], int], None, None]:
         """
         Stream voice clone speech generation, yielding PCM chunks as they are generated.
 
-        NOTE: This method only supports single-sample generation (no batching).
+        Supports batching: pass list of texts/languages/prompts; each yield is (chunks_list, sr)
+        where chunks_list[b] is the new PCM chunk for batch index b.
 
         Args:
-            text: Text to synthesize (single string only).
-            language: Language for synthesis.
+            text: Text(s) to synthesize (string or list of strings).
+            language: Language(s) for synthesis.
             ref_audio: Reference audio for prompt building (required if voice_clone_prompt not provided).
             ref_text: Reference text for ICL mode.
             x_vector_only_mode: If True, only speaker embedding is used.
-            voice_clone_prompt: Pre-built VoiceClonePromptItem from create_voice_clone_prompt.
+            voice_clone_prompt: Pre-built VoiceClonePromptItem or list of VoiceClonePromptItem from create_voice_clone_prompt.
             non_streaming_mode: Whether to use non-streaming text input mode.
             emit_every_frames: Emit PCM chunk every N codec frames.
             decode_window_frames: Window size for decoding (longer = better quality, more latency).
@@ -731,7 +732,7 @@ class Qwen3TTSModel:
             **kwargs: Generation parameters (do_sample, top_k, top_p, temperature, etc.)
 
         Yields:
-            Tuple[np.ndarray, int]: (pcm_chunk as float32 array, sample_rate)
+            Tuple[List[np.ndarray], int]: (list of pcm chunks, one per batch item; sample_rate)
         """
         if self.model.tts_model_type != "base":
             raise ValueError(
@@ -739,14 +740,20 @@ class Qwen3TTSModel:
                 "does not support stream_generate_voice_clone"
             )
 
-        if isinstance(text, list):
-            raise ValueError("stream_generate_voice_clone only supports single text, not batch")
+        if isinstance(text, str):
+            texts = [text]
+        else:
+            texts = text
 
-        texts = [text]
-        languages = [language if language is not None else "Auto"]
+        languages = self._ensure_list(language) if isinstance(language, list) else ([language] * len(texts) if language is not None else ["Auto"] * len(texts))
+        if len(languages) == 1 and len(texts) > 1:
+            languages = languages * len(texts)
+        if len(texts) != len(languages):
+            raise ValueError(f"Batch size mismatch: text={len(texts)}, language={len(languages)}")
+
         self._validate_languages(languages)
 
-        # Build voice clone prompt
+        # Build voice clone prompt (aligned with generate_voice_clone: list of prompts + text/language)
         if voice_clone_prompt is None:
             if ref_audio is None:
                 raise ValueError("Either voice_clone_prompt or ref_audio must be provided")
@@ -755,17 +762,25 @@ class Qwen3TTSModel:
                 ref_text=ref_text,
                 x_vector_only_mode=x_vector_only_mode
             )
+            if len(prompt_items) == 1 and len(texts) > 1:
+                prompt_items = prompt_items * len(texts)
+            if len(prompt_items) != len(texts):
+                raise ValueError(f"Batch size mismatch: prompt={len(prompt_items)}, text={len(texts)}")
             voice_clone_prompt_dict = self._prompt_items_to_voice_clone_prompt(prompt_items)
-            ref_texts_for_ids = [prompt_items[0].ref_text]
+            ref_texts_for_ids = [it.ref_text for it in prompt_items]
         elif isinstance(voice_clone_prompt, VoiceClonePromptItem):
             prompt_items = [voice_clone_prompt]
             voice_clone_prompt_dict = self._prompt_items_to_voice_clone_prompt(prompt_items)
             ref_texts_for_ids = [voice_clone_prompt.ref_text]
         elif isinstance(voice_clone_prompt, list):
-            # List of VoiceClonePromptItem
+            # List of VoiceClonePromptItem: one ref_text per item, expand if single prompt + multiple texts
             prompt_items = voice_clone_prompt
+            if len(prompt_items) == 1 and len(texts) > 1:
+                prompt_items = prompt_items * len(texts)
+            if len(prompt_items) != len(texts):
+                raise ValueError(f"Batch size mismatch: prompt={len(prompt_items)}, text={len(texts)}")
             voice_clone_prompt_dict = self._prompt_items_to_voice_clone_prompt(prompt_items)
-            ref_texts_for_ids = [prompt_items[0].ref_text]
+            ref_texts_for_ids = [it.ref_text for it in prompt_items]
         else:
             # Already a dict
             voice_clone_prompt_dict = voice_clone_prompt
@@ -793,8 +808,8 @@ class Qwen3TTSModel:
         }
         gen_kwargs = {k: v for k, v in gen_kwargs.items() if k in supported_params}
 
-        # Call streaming generation
-        for chunk, sr in self.model.stream_generate_pcm(
+        # Call streaming generation (yields (chunks_list, sr) with one chunk per batch item)
+        for chunks_list, sr in self.model.stream_generate_pcm(
             input_ids=input_ids,
             ref_ids=ref_ids,
             voice_clone_prompt=voice_clone_prompt_dict,
@@ -810,7 +825,7 @@ class Qwen3TTSModel:
             first_chunk_frames=first_chunk_frames,
             **gen_kwargs,
         ):
-            yield chunk, sr
+            yield chunks_list, sr
 
     # voice design model
     @torch.no_grad()
