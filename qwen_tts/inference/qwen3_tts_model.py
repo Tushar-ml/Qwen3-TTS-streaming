@@ -684,7 +684,7 @@ class Qwen3TTSModel:
         return wavs_out, fs
 
     @torch.inference_mode()
-    def stream_generate_voice_clone(
+    async def stream_generate_voice_clone(
         self,
         text: Union[str, List[str]],
         language: Union[str, List[str]] = None,

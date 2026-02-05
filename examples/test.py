@@ -3,6 +3,7 @@ from qwen_tts import Qwen3TTSModel
 import soundfile as sf
 import numpy as np
 import time
+import asyncio
 # Load model
 model = Qwen3TTSModel.from_pretrained(
     "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -38,34 +39,37 @@ texts = [test_text, test_text]
 batch_size = len(texts)
 
 # Stream audio with two-phase settings (batched)
-for phase in range(5):
-    print(f"Phase {phase + 1}")
-    # Accumulate chunks per batch index: all_chunks[b] = list of chunks for item b
-    all_chunks = [[] for _ in range(batch_size)]
-    ttft = None
-    start_time = time.time()
-    for chunks_list, sr in model.stream_generate_voice_clone(
-        text=texts,
-        language="english",
-        voice_clone_prompt=prompt,
-        # Phase 2 settings (stable)
-        emit_every_frames=12,
-        decode_window_frames=80,
-        # Phase 1 settings (fast first chunk)
-        first_chunk_emit_every=5,
-        first_chunk_decode_window=48,
-        first_chunk_frames=48,
-    ):
-        if ttft is None:
-            ttft = time.time() - start_time
-            print("TTFT: ", ttft)
-        for b in range(batch_size):
-            if len(chunks_list[b]) > 0:
-                all_chunks[b].append(chunks_list[b])
+async def stream_audio():
+    for phase in range(5):
+        print(f"Phase {phase + 1}")
+        # Accumulate chunks per batch index: all_chunks[b] = list of chunks for item b
+        all_chunks = [[] for _ in range(batch_size)]
+        ttft = None
+        start_time = time.time()
+        async for chunks_list, sr in model.stream_generate_voice_clone(
+            text=texts,
+            language="english",
+            voice_clone_prompt=prompt,
+            # Phase 2 settings (stable)
+            emit_every_frames=12,
+            decode_window_frames=80,
+            # Phase 1 settings (fast first chunk)
+            first_chunk_emit_every=5,
+            first_chunk_decode_window=48,
+            first_chunk_frames=48,
+        ):
+            if ttft is None:
+                ttft = time.time() - start_time
+                print("TTFT: ", ttft)
+            for b in range(batch_size):
+                if len(chunks_list[b]) > 0:
+                    all_chunks[b].append(chunks_list[b])
 
-    # Save one wav per batch item
-    for b in range(batch_size):
-        if all_chunks[b]:
-            wav = np.concatenate(all_chunks[b])
-            sf.write(f"phase_{phase + 1}_batch_{b}.wav", wav, sr)
-            print(f"  Saved phase_{phase + 1}_batch_{b}.wav ({len(wav)} samples)")
+        # Save one wav per batch item
+        for b in range(batch_size):
+            if all_chunks[b]:
+                wav = np.concatenate(all_chunks[b])
+                sf.write(f"phase_{phase + 1}_batch_{b}.wav", wav, sr)
+                print(f"  Saved phase_{phase + 1}_batch_{b}.wav ({len(wav)} samples)")
+
+asyncio.run(stream_audio())
