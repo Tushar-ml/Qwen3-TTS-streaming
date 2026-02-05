@@ -46,7 +46,7 @@ async def stream_audio():
         all_chunks = [[] for _ in range(batch_size)]
         ttft = None
         start_time = time.time()
-        async for chunks_list, sr in model.stream_generate_voice_clone(
+        for chunks_list, sr in model.stream_generate_voice_clone(
             text=texts,
             language="english",
             voice_clone_prompt=prompt,
